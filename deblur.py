@@ -8,7 +8,7 @@ import random
 class Params:
 
     def __init__(self, radius):
-        self.population_size = 20
+        self.population_size = 200
 
         self.blur_strategy = ('gaussian', (radius, radius))
         self.fitness_calc_strategy = 'average_rgb_distance_euclidian'
@@ -199,6 +199,110 @@ class Simulation:
         self.population.sort(key=lambda img: img[1])
 
 
+class Simulation2:
+
+    def __init__(self, target: pygame.Surface, blur_func):
+        self.target = target
+        self.target_channels = [
+            pygame.surfarray.array_red(self.target),
+            pygame.surfarray.array_green(self.target),
+            pygame.surfarray.array_blue(self.target),
+        ]
+
+        self.blur_func = blur_func
+
+        self.img = target.copy()
+        self.blurred_img = None
+
+        self.distance = None
+        self.blurred_distance = None
+        self.anti_distance = None
+        self.blurred_anti_distance = None
+
+        self.fitness = None
+        self.step_count = None
+
+        self.restart()
+
+    def get_output(self):
+        return self.img
+
+    def get_fitness(self):
+        return self.fitness
+
+    def restart(self):
+        self.img = self.target.copy()
+        self.blurred_img = None
+        self.distance = None
+        self.blurred_distance = None
+        self.anti_distance = None
+        self.blurred_anti_distance = None
+        self.fitness = -1
+        self.step_count = 0
+        self._calc_derived_images()
+
+    def step(self):
+        blur_dist_array = pygame.surfarray.pixels3d(self.blurred_distance)
+        blur_anti_dist_array = pygame.surfarray.pixels3d(self.blurred_anti_distance)
+        ratio = max(2, 5 * (1 - self.step_count / 300))
+
+        new_img_int8 = pygame.surfarray.array3d(self.img)
+        new_img = new_img_int8.astype(numpy.float64)
+        rand = numpy.random.rand(*new_img.shape)
+
+        new_img[:] = new_img + blur_dist_array * (rand * ratio)
+        new_img[:] = new_img - blur_anti_dist_array * (rand * ratio)
+        new_img[:] = numpy.minimum(new_img, 255.999)
+        new_img[:] = numpy.maximum(new_img, 0)
+
+        new_img_int8[:] = new_img.astype(numpy.int8, casting='unsafe')
+        pygame.surfarray.blit_array(self.img, new_img_int8)
+
+        self._calc_derived_images()
+        self.step_count += 1
+
+    def _calc_derived_images(self):
+        self.blurred_img = self.blur_func(self.img)
+        self.distance, self.anti_distance = self._calc_distance_from_target(self.blurred_img)
+        self.blurred_distance = self.blur_func(self.distance)
+        self.blurred_anti_distance = self.blur_func(self.anti_distance)
+
+        self.fitness = (numpy.mean(pygame.surfarray.pixels3d(self.distance))
+                        + numpy.mean(pygame.surfarray.pixels3d(self.anti_distance))) / 3
+
+    def _calc_distance_from_target(self, img):
+        res = img.copy()
+        for i, channel in enumerate(self._get_color_channel_refs(res)):
+            too_low = self.target_channels[i] > channel
+            channel[too_low] = (self.target_channels[i] - channel)[too_low]
+            channel[~too_low] = 0
+
+        res_anti = img.copy()
+        for i, channel in enumerate(self._get_color_channel_refs(res_anti)):
+            too_high = channel > self.target_channels[i]
+            channel[too_high] = (channel - self.target_channels[i])[too_high]
+            channel[~too_high] = 0
+
+        return res, res_anti
+
+    def _get_color_channel_refs(self, img):
+        return [
+            pygame.surfarray.pixels_red(img),
+            pygame.surfarray.pixels_green(img),
+            pygame.surfarray.pixels_blue(img)
+        ]
+
+
+def get_box_filter_func(radius):
+    def box_filter(img: pygame.Surface) -> pygame.Surface:
+        res = img.copy()
+        px = pygame.surfarray.array3d(res)
+        cv2.blur(px, ksize=(radius, radius), dst=px)
+        pygame.surfarray.blit_array(res, px)
+        return res
+    return box_filter
+
+
 if __name__ == "__main__":
     # s = pygame.Surface((10, 10))
     # s.fill((255, 255, 255))
@@ -212,19 +316,24 @@ if __name__ == "__main__":
 
     pygame.init()
 
-    img_file = "data/3x3_circle_in_10x10.png"  # "data/splash_blurred_15.png"
+    # original = pygame.Surface((10, 10))
+    # original.fill((255, 255, 255))
+    # pygame.draw.circle(original, (0, 0, 0), original.get_rect().center, 3)
+
+    img_file = "data/splash_blurred_15.png"  # "data/3x3_circle_in_10x10.png"  #
     target_image = pygame.image.load(img_file)
+    original = pygame.image.load("data/splash.png")
 
-    params = Params(3)
-    params.population_size = 20
+    simulation = Simulation2(target_image, get_box_filter_func(15))
 
-    simulation = Simulation(target_image, params)
+    W, H = target_image.get_size()
 
-    screen = pygame.display.set_mode(target_image.get_size(), pygame.SCALED | pygame.RESIZABLE)
+    screen = pygame.display.set_mode((W * 4, H * 2), pygame.SCALED | pygame.RESIZABLE)
     clock = pygame.time.Clock()
 
     auto_step = True
-    modes = ('normal', 'blurred', 'distance', 'target')
+    pause_at = -1
+    modes = ('normal', 'blurred', 'distance', 'anti_distance', 'target', 'original')
     mode = 0
 
     running = True
@@ -236,35 +345,36 @@ if __name__ == "__main__":
                 if e.key == pygame.K_SPACE:
                     simulation.step()
                     auto_step = False
-                    print(f"INFO: Best fitness at step {simulation.step_count} is {simulation.get_best_fitness()}")
+                    print(f"INFO: Best fitness at step {simulation.step_count} is {simulation.get_fitness()}")
                 elif e.key == pygame.K_r:
                     print("INFO: restarting simulation")
                     auto_step = True
                     simulation.restart()
                 elif e.key == pygame.K_m:
-                    mode = (mode + 1) % len(modes)
+                    if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                        mode = (mode - 1) % len(modes)
+                    else:
+                        mode = (mode + 1) % len(modes)
                     print(f"INFO: setting viewing mode to {modes[mode]}")
 
         if auto_step:
             simulation.step()
-            print(f"INFO: Best fitness at step {simulation.step_count} is {simulation.get_best_fitness()}")
+            print(f"INFO: Best fitness at step {simulation.step_count} is {simulation.get_fitness()}")
+
+            if pause_at == simulation.step_count:
+                auto_step = False
 
         screen = pygame.display.get_surface()
 
-        best_img, best_fitness, blurred_img, _ = simulation.get_best()
-        if best_img is not None:
-            if modes[mode] == 'normal':
-                screen.blit(best_img, (0, 0))
-            elif modes[mode] == 'blurred':
-                screen.blit(blurred_img, (0, 0))
-            elif modes[mode] == 'distance':
-                screen.blit(simulation.get_per_pixel_distance_as_image(), (0, 0))
-            elif modes[mode] == 'target':
-                screen.blit(simulation.target_image, (0, 0))
-            else:
-                screen.fill((0, 0, 0))
-        else:
-            screen.blit(simulation.target_image, (0, 0))
+        to_blit = [
+            [simulation.img, original, simulation.distance, simulation.anti_distance],
+            [simulation.blurred_img, target_image, simulation.blurred_distance, simulation.blurred_anti_distance]
+        ]
+        screen.fill((0, 0, 0))
+        for y in range(len(to_blit)):
+            for x in range(len(to_blit[0])):
+                if to_blit[y][x] is not None:
+                    screen.blit(to_blit[y][x], (x * W, y * H))
 
         pygame.display.flip()
         clock.tick(15)
